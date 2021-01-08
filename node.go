@@ -110,7 +110,7 @@ func (n *Node) GetNode(path string) *Node {
 		// so this paths will be the same
 		// /root/Button
 		// /Button
-		if len(paths[1:]) > 1 && n.GetRootNode().Name() == paths[1:] {
+		if len(paths[1:]) > 1 && n.GetRootNode().Name() == paths[1] {
 			paths = paths[1:]
 		}
 		return n.GetRootNode().GetNode(strings.Join(paths[1:], "/"))
