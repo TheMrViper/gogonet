@@ -5,7 +5,7 @@ import (
 	"net"
 	"time"
 
-	"github.com/themrviper/gogoenent/enet"
+	"github.com/themrviper/gogonet/enet"
 )
 
 type IRPC interface {
