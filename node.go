@@ -91,6 +91,8 @@ func (n *Node) Path() (result string) {
 		result = "/" + n.name + result
 		n = n.parent
 	}
+
+	result = "/" + n.name + result
 	return
 }
 

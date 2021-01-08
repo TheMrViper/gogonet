@@ -5,7 +5,7 @@ import (
 	"net"
 	"time"
 
-	"./enet"
+	"github.com/themrviper/gogoenent/enet"
 )
 
 type IRPC interface {
