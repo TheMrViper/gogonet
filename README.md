@@ -1,2 +1,2 @@
 # gogonet
-GoDot hight-level networking for golang
+GoDot high-level networking for golang
