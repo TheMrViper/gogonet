@@ -1,15 +1,27 @@
 package gogonet
 
-import "io"
+import "reflect"
 
-type StreamReader struct {
-	io.Reader
+func decodePacketVariables(packet []byte) []interface{} {
+
+	paramsCount, packet := decode_uint8(packet)
+
 }
 
-func NewStreamReader(reader io.Reader) *StreamReader {
-	return &StreamReader{Reader: reader}
+func canCallProcedure(object interface{}, procedureName string) bool {
+	return reflect.ValueOf(object).MethodByName(procedureName) != nil
 }
 
-func (r *StreamReader) ReadUint32() uint32 {
-	return 0
+func reflectProcedureCall(object interface{}, procedureName string, params []interface{}) {
+	reflectedParams = reflect_procedure_variables(params)
+	reflect.ValueOf(object).MethodByName(procedureName).Call(reflectedParams)
+}
+
+func reflectProcedureVariables(v []interface{}) []reflect.Value {
+	r := make([]reflect.Value, len(v))
+	for i, _ := range v {
+		r[i] = reflect.ValueOf(v[i])
+	}
+
+	return r
 }

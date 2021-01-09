@@ -168,13 +168,18 @@ func (m *MultiplayerAPI) process_confirm_path(from int32, packet []byte) {
 }
 
 func (m *MultiplayerAPI) process_rpc(node *Node, procedureName string, from int32, packet []byte) {
-	utils.Log(6, "procedure call", procedureName, from, node.Path())
-	utils.Logf(6, "params data: %x\n", packet)
+	utils.IfLog(!canCallProcedure(node, procedureName), 6, "Uknnown procedure call ", procedureName, node.Path())
+
+	procedureVariables = decodePacketVariables(packet)
+
+	go reflectProcedureCall(node, procedureName, procedureVariables)
 }
 
 func (m *MultiplayerAPI) process_rset(node *Node, variableName string, from int32, packet []byte) {
 	utils.Log(6, "variable set", variableName, from)
 	utils.Logf(6, "params data: %x\n", packet)
+
+	utils.Panic("Not implemented")
 }
 
 func (m *MultiplayerAPI) OnConnected(peer_id int32, peer *enet.Peer) {
