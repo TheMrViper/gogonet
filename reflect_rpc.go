@@ -4,7 +4,7 @@ import (
 	"log"
 	"reflect"
 
-	"./marshal"
+	"github.com/TheMrViper/gogonet/marshal"
 )
 
 func canCallReflectProcedure(object interface{}, procedureName string) bool {

@@ -4,9 +4,9 @@ import (
 	"fmt"
 	"sync/atomic"
 
-	"./marshal"
-	"./signals"
-	"./utils"
+	"github.com/TheMrViper/gogonet/marshal"
+	"github.com/TheMrViper/gogonet/signals"
+	"github.com/TheMrViper/gogonet/utils"
 )
 
 type NetworkCommand uint8

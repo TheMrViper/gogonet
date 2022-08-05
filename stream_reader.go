@@ -1,6 +1,6 @@
 package gogonet
 
-import "./marshal"
+import "github.com/TheMrViper/gogonet/marshal"
 
 type StreamReader struct {
 	buffer []byte

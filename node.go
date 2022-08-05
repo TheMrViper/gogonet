@@ -6,8 +6,8 @@ import (
 	"sync/atomic"
 	"time"
 
-	"./signals"
-	"./utils"
+	"github.com/TheMrViper/gogonet/signals"
+	"github.com/TheMrViper/gogonet/utils"
 )
 
 type Node struct {
