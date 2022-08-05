@@ -1,10 +1,10 @@
 package enet
 
 import (
-	"../utils"
+	"github.com/TheMrViper/gogonet/utils"
 )
 
-func CreateClient(address string, port uint32) *EnetBase {
+func CreateClient(address string, port uint32) error {
 	utils.Panic("Not implemented")
 	return nil
 }

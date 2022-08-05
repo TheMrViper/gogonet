@@ -1,6 +1,7 @@
 package gogonet
 
 import (
+	"fmt"
 	"log"
 	"strings"
 	"sync/atomic"
@@ -75,6 +76,8 @@ func (t *Node) ListenAndServe() {
 
 		prev = now
 	}
+
+	fmt.Print(prev)
 }
 
 //
