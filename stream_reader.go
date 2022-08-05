@@ -1,27 +1,22 @@
 package gogonet
 
-import "reflect"
+import "./marshal"
 
-func decodePacketVariables(packet []byte) []interface{} {
-
-	paramsCount, packet := decode_uint8(packet)
-
+type StreamReader struct {
+	buffer []byte
 }
 
-func canCallProcedure(object interface{}, procedureName string) bool {
-	return reflect.ValueOf(object).MethodByName(procedureName) != nil
-}
-
-func reflectProcedureCall(object interface{}, procedureName string, params []interface{}) {
-	reflectedParams = reflect_procedure_variables(params)
-	reflect.ValueOf(object).MethodByName(procedureName).Call(reflectedParams)
-}
-
-func reflectProcedureVariables(v []interface{}) []reflect.Value {
-	r := make([]reflect.Value, len(v))
-	for i, _ := range v {
-		r[i] = reflect.ValueOf(v[i])
+func NewStreamReader(a []byte) *StreamReader {
+	// skip first byte, we dont need it here
+	return &StreamReader{
+		buffer: a[1:],
 	}
+}
 
-	return r
+func (r *StreamReader) ReadInt32() (i int32) {
+	// skip var type, we know it already
+	_, r.buffer = marshal.DecodeInt32(r.buffer)
+	i, r.buffer = marshal.DecodeInt32(r.buffer)
+
+	return
 }

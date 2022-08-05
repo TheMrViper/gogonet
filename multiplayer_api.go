@@ -1,84 +1,142 @@
 package gogonet
 
 import (
-	"github.com/themrviper/gogonet/enet"
-	"github.com/themrviper/gogonet/utils"
+	"fmt"
+	"sync/atomic"
+
+	"./marshal"
+	"./signals"
+	"./utils"
 )
+
+type NetworkCommand uint8
+
+func (i NetworkCommand) Uint8() uint8 {
+	return uint8(i)
+}
 
 const (
-	NETWORK_COMMAND_REMOTE_CALL = iota
-	NETWORK_COMMAND_REMOTE_SET
-	NETWORK_COMMAND_SIMPLIFY_PATH
-	NETWORK_COMMAND_CONFIRM_PATH
-	NETWORK_COMMAND_RAW
+	CommandRemoteCall   NetworkCommand = 0
+	CommandRemoteSet    NetworkCommand = 1
+	CommandSimplifyPath NetworkCommand = 2
+	CommandConfirmPath  NetworkCommand = 3
+	CommandRaw          NetworkCommand = 4
 )
 
+type INetworkPeer interface {
+	signals.ISubscribeable
+
+	GetPacket() (source uint32, target int32, data []byte)
+	PutPacket()
+	ListenAndServe()
+}
+
 type SentPathCache struct {
-	id              uint32
-	confirmed_peers map[int32]bool
+	id             uint32
+	confirmedPeers map[uint32]bool
 }
 
 type MultiplayerAPI struct {
-	connected_peers map[int32]*enet.Peer
+	active bool
 
-	last_send_cache_id uint32
+	signals *signals.Signal
 
-	recv_path_cache map[int32]map[uint32]string
-	sent_path_cache map[string]*SentPathCache
+	networkPeer INetworkPeer
+
+	connectedPeers map[uint32]bool
+
+	lastSendCacheId uint32
+
+	recvPathCache map[uint32]map[uint32]string
+	sentPathCache map[string]*SentPathCache
 }
 
-func (m *MultiplayerAPI) process_packet(from int32, packet []byte) {
-	utils.IfPanic(len(packet) < 1, "Invalid packet received. Size too small.")
+func (m *MultiplayerAPI) SetNetworkPeer(peer INetworkPeer) {
+	utils.IfPanic(m.active, "Cannot change peer when server is running")
 
-	packetType, packet := decode_uint8(packet)
+	if m.networkPeer != nil {
+		m.networkPeer.Off("peer_connected")
+		m.networkPeer.Off("peer_disconnected")
+		m.networkPeer.Off("connection_succeeded")
+		m.networkPeer.Off("connection_failed")
+		m.networkPeer.Off("server_disconnected")
+	}
 
-	switch packetType {
-	case NETWORK_COMMAND_SIMPLIFY_PATH:
-		m.process_simplify_path(from, packet)
-	case NETWORK_COMMAND_CONFIRM_PATH:
-		m.process_confirm_path(from, packet)
-	case NETWORK_COMMAND_REMOTE_CALL:
-		fallthrough
-	case NETWORK_COMMAND_REMOTE_SET:
-		//utils.IfPanic(packetLen < 6, "Invalid packet received. Size too small.")
-
-		target, packet := decode_uint32(packet)
-		node := m.process_get_node(from, target, packet)
-
-		if node == nil {
-			// process custom solution
-			// if rpc func just added without node, set node to dummy
-			node = rpc_dummy_node
-		}
-
-		name, packet := decode_cstring(packet)
-
-		if packetType == NETWORK_COMMAND_REMOTE_CALL {
-			m.process_rpc(node, name, from, packet)
-		} else {
-			m.process_rset(node, name, from, packet)
-		}
-	case NETWORK_COMMAND_RAW:
-		break
+	if peer != nil {
+		m.networkPeer = peer
+		m.networkPeer.On("peer_connected", m.addPeer)
+		m.networkPeer.On("peer_disconnected", m.deletePeer)
+		m.networkPeer.On("connection_succeeded", m.connectionSucceeded)
+		m.networkPeer.On("connection_failed", m.connectionFailed)
+		m.networkPeer.On("server_disconnected", m.serverDisconnected)
 	}
 }
 
-func (m *MultiplayerAPI) process_get_node(from int32, target uint32, packet []byte) *Node {
+func (m *MultiplayerAPI) ListenAndServe() {
+	utils.IfPanic(m.networkPeer == nil, "NetworkPeer cannot be nil")
 
-	if target&0x80000000 > 0 {
-		ofs := (target & 0x7FFFFFFF)
+	go m.networkPeer.ListenAndServe()
 
-		// 1 - packet type size, 4 - target size
-		utils.IfPanic(ofs-1-4 >= uint32(len(packet)), "Invalid packet received. Size smaller than declared.")
+	for {
+		source, target, data := m.networkPeer.GetPacket()
+		m.processPacket(source, target, data)
+	}
+}
 
-		path, _ := decode_cstring(packet[ofs-1-4:])
+func (m *MultiplayerAPI) addPeer(id uint32) {
+	_, ok := m.connectedPeers[id]
+	utils.IfPanic(ok, "Duplicate peer id, how its happend???")
 
-		return GetRootNode().GetNode(path)
+	m.connectedPeers[id] = true
+	m.recvPathCache[id] = make(map[uint32]string)
+}
+
+func (m *MultiplayerAPI) deletePeer(id uint32) {
+
+	delete(m.connectedPeers, id)
+	delete(m.recvPathCache, id)
+
+	for path, cache := range m.sentPathCache {
+
+		for confirmedPeerId := range cache.confirmedPeers {
+
+			if confirmedPeerId == id {
+				delete(m.sentPathCache[path].confirmedPeers, id)
+			}
+		}
+	}
+
+	m.signals.Emit("network_peer_disconnected", id)
+}
+
+func (m *MultiplayerAPI) connectionSucceeded() {
+	m.signals.Emit("connection_succeeded")
+}
+func (m *MultiplayerAPI) connectionFailed() {
+	m.signals.Emit("connection_failed")
+}
+func (m *MultiplayerAPI) serverDisconnected() {
+	m.signals.Emit("server_disconnected")
+}
+
+func (m *MultiplayerAPI) processGetNode(source uint32, nodeCachedId uint32, data []byte) INode {
+	//defer utils.Recover("process_get_node")
+
+	if nodeCachedId&0x80000000 > 0 {
+		ofs := (nodeCachedId & 0x7FFFFFFF)
+
+		// 1 - packet type size, 4 - nodeCachedId size
+		utils.IfPanic(ofs-1-4 >= uint32(len(data)), "Invalid packet received. Size smaller than declared.")
+
+		path, _ := marshal.DecodeCString(data[ofs-1-4:])
+
+		fmt.Println(path)
+		return GetTree().GetNode(path)
 	} else {
-		if nodes, ok := m.recv_path_cache[from]; ok {
-			if path, ok := nodes[target]; ok {
+		if nodes, ok := m.recvPathCache[source]; ok {
+			if path, ok := nodes[nodeCachedId]; ok {
 
-				return GetRootNode().GetNode(path)
+				return GetTree().GetNode(path)
 			}
 
 			utils.Panic("Invalid packet received. Unabled to find requested cached node.")
@@ -90,33 +148,81 @@ func (m *MultiplayerAPI) process_get_node(from int32, target uint32, packet []by
 	return nil
 }
 
-func (m *MultiplayerAPI) send_simplify_path(node *Node, to int32) (cache *SentPathCache, has_all_peers bool) {
+func (m *MultiplayerAPI) sendPacket(node INode, target int32, unreliable bool, procedureName string, v ...interface{}) {
+
+}
+
+func (m *MultiplayerAPI) processPacket(source uint32, target int32, data []byte) {
+	//defer utils.Recover("process_packet")
+	utils.IfPanic(len(data) < 1, "Invalid packet received. Size too small.")
+
+	packetType, data := marshal.DecodeUint8(data)
+
+	switch packetType {
+	case CommandSimplifyPath.Uint8():
+		m.processSimplifyPath(source, data)
+	case CommandConfirmPath.Uint8():
+		m.processConfirmPath(source, data)
+	case CommandRemoteCall.Uint8():
+		fallthrough
+	case CommandRemoteSet.Uint8():
+		//utils.IfPanic(packetLen < 6, "Invalid packet received. Size too small.")
+
+		nodeCachedId, data := marshal.DecodeUint32(data)
+
+		node := m.processGetNode(source, nodeCachedId, data)
+
+		utils.IfPanic(node == nil, "Unknown node for rpc call")
+
+		name, data := marshal.DecodeCString(data)
+
+		if packetType == CommandRemoteCall.Uint8() {
+			m.processRpc(node, name, source, data)
+		} else {
+			m.processRset(node, name, source, data)
+		}
+	case CommandRemoteSet.Uint8():
+		m.processRaw(source, data)
+	}
+}
+
+func (m *MultiplayerAPI) sendRaw(data []byte) {
+
+}
+
+func (m *MultiplayerAPI) processRaw(source uint32, data []byte) {
+
+}
+
+func (m *MultiplayerAPI) sendSimplifyPath(node INode, target int32) (cache *SentPathCache, has_all_peers bool) {
+	//defer utils.Recover("send_simplify_path")
 	ok := false
-	m.last_send_cache_id += 1
 
-	if cache, ok = m.sent_path_cache[node.Path()]; !ok {
+	atomic.AddUint32(&m.lastSendCacheId, 1)
+
+	if cache, ok = m.sentPathCache[node.Path()]; !ok {
 		cache := &SentPathCache{
-			id: m.last_send_cache_id,
+			id: m.lastSendCacheId,
 
-			confirmed_peers: make(map[int32]bool),
+			confirmedPeers: make(map[uint32]bool),
 		}
 
-		m.sent_path_cache[node.Path()] = cache
+		m.sentPathCache[node.Path()] = cache
 	}
 
 	has_all_peers = true
 
-	for peer_id, _ := range m.connected_peers {
+	for peerId, _ := range m.connectedPeers {
 
-		if to < 0 && peer_id == -to {
+		if target < 0 && peerId == uint32(target*-1) {
 			continue // Continue, excluded.
 		}
 
-		if to > 0 && peer_id != to {
+		if target > 0 && peerId != uint32(target) {
 			continue // Continue, not for this peer.
 		}
 
-		if confirmed, ok := cache.confirmed_peers[peer_id]; !confirmed || !ok {
+		if confirmed, ok := cache.confirmedPeers[peerId]; !confirmed || !ok {
 
 			//TODO generate packet
 
@@ -126,100 +232,74 @@ func (m *MultiplayerAPI) send_simplify_path(node *Node, to int32) (cache *SentPa
 
 	return cache, has_all_peers
 }
-func (m *MultiplayerAPI) process_simplify_path(from int32, packet []byte) {
+func (m *MultiplayerAPI) processSimplifyPath(source uint32, packet []byte) {
+	//defer utils.Recover("process_simplify_path")
 	utils.IfPanic(len(packet) < 5, "Invalid packet received. Size too small.")
 
-	id, packet := decode_uint32(packet)
-	path, packet := decode_cstring(packet)
+	id, packet := marshal.DecodeUint32(packet)
+	path, packet := marshal.DecodeCString(packet)
 
-	if _, ok := m.recv_path_cache[from]; !ok {
-		m.recv_path_cache[from] = make(map[uint32]string)
+	if _, ok := m.recvPathCache[source]; !ok {
+		m.recvPathCache[source] = make(map[uint32]string)
 	}
 
-	m.recv_path_cache[from][id] = path
+	m.recvPathCache[source][id] = path
 
-	m.send_confirm_path(from, path)
+	m.sendConfirmPath(source, path)
 }
 
-func (m *MultiplayerAPI) send_confirm_path(to int32, path string) {
+func (m *MultiplayerAPI) sendConfirmPath(target uint32, path string) {
+	//defer utils.Recover("send_confirm_path")
 	packet := make([]byte, 0, len(path)+2+8)
 
-	packet = encode_int32(1, packet)
-	packet = encode_int32(to, packet)
-	packet = encode_int8(int8(NETWORK_COMMAND_CONFIRM_PATH), packet)
-	packet = encode_cstring(packet, path)
+	packet = marshal.EncodeUint32(1, packet)
+	packet = marshal.EncodeUint32(target, packet)
+	packet = marshal.EncodeUint8(CommandConfirmPath.Uint8(), packet)
+	packet = marshal.EncodeCString(path, packet)
 
-	m.SendPacket(to, packet, enet.FlagReliable)
+	//m.sendPacket(to, packet, enet.FlagReliable)
 }
 
-func (m *MultiplayerAPI) process_confirm_path(from int32, packet []byte) {
+func (m *MultiplayerAPI) processConfirmPath(source uint32, packet []byte) {
+	//defer utils.Recover("process_confirm_path")
 	utils.IfPanic(len(packet) < 2, "Invalid packet received. Size too small.")
 
-	decode_uint8(packet)
-	path, _ := decode_cstring(packet)
+	path, _ := marshal.DecodeCString(packet)
 
-	cache, ok := m.sent_path_cache[path]
+	cache, ok := m.sentPathCache[path]
 	utils.IfPanic(!ok, "Invalid packet received. Tries to confirm a path which was not found in cache.")
 
-	_, ok = cache.confirmed_peers[from]
+	_, ok = cache.confirmedPeers[source]
 	utils.IfPanic(!ok, "Invalid packet received. Source peer was not found in cache for the given path.")
 
-	m.sent_path_cache[path].confirmed_peers[from] = true
+	m.sentPathCache[path].confirmedPeers[source] = true
 }
 
-func (m *MultiplayerAPI) process_rpc(node *Node, procedureName string, from int32, packet []byte) {
-	utils.IfLog(!canCallProcedure(node, procedureName), 6, "Uknnown procedure call ", procedureName, node.Path())
+func (m *MultiplayerAPI) processRpc(node INode, procedureName string, source uint32, data []byte) {
+	//defer utils.Recover("process_rpc")
 
-	procedureVariables = decodePacketVariables(packet)
+	if canCallNativeProcedure(node, procedureName) {
+		procedure := getNativeProcedure(node, procedureName)
 
-	go reflectProcedureCall(node, procedureName, procedureVariables)
+		streamReader := NewStreamReader(data)
+		procedure.SetOwnerNode(node)
+		procedure.Unmarshal(streamReader)
+
+		go procedure.Call()
+	} else if canCallReflectProcedure(node, procedureName) {
+
+		procedureVariables := reflectDecodePacketVariables(data)
+
+		go reflectProcedureCall(node, procedureName, procedureVariables)
+	} else {
+		utils.Panic("Uknnown procedure call")
+	}
 }
 
-func (m *MultiplayerAPI) process_rset(node *Node, variableName string, from int32, packet []byte) {
-	utils.Log(6, "variable set", variableName, from)
-	utils.Logf(6, "params data: %x\n", packet)
+func (m *MultiplayerAPI) processRset(node INode, variableName string, source uint32, data []byte) {
+	//defer utils.Recover("process_rset")
+	utils.Log(6, "variable set", variableName, source)
+	utils.Logf(6, "params data: %x\n", data)
 
 	utils.Panic("Not implemented")
-}
-
-func (m *MultiplayerAPI) OnConnected(peer_id int32, peer *enet.Peer) {
-	_, ok := m.connected_peers[peer_id]
-	utils.IfPanic(ok, "Duplicate peer id, how its happend???")
-
-	m.connected_peers[peer_id] = peer
-	m.recv_path_cache[peer_id] = make(map[uint32]string)
-}
-
-func (m *MultiplayerAPI) OnDisconnected(peer_id int32) {
-
-	delete(m.connected_peers, peer_id)
-	delete(m.recv_path_cache, peer_id)
-
-	for path, cache := range m.sent_path_cache {
-
-		for confirmed_peer_id := range cache.confirmed_peers {
-
-			if confirmed_peer_id == peer_id {
-				delete(m.sent_path_cache[path].confirmed_peers, peer_id)
-			}
-		}
-	}
-}
-
-func (m *MultiplayerAPI) OnMessage(peer_id int32, packet []byte) {
-	//defer utils.Recover("OnMessage")
-
-	utils.Logf(6, "OnMessage from %d packet %x \n", peer_id, packet)
-	m.process_packet(peer_id, packet)
-}
-
-func (m *MultiplayerAPI) SendPacket(to int32, packet []byte, flags enet.Flag) error {
-
-	utils.Logf(6, "send: %d\n", to)
-	if peer, ok := m.connected_peers[to]; ok {
-		utils.Logf(6, "Send: to %d packet %x\n", to, packet)
-		utils.Log(6, "Send result: ", peer.Send(1, packet, flags))
-	}
-
-	return nil
 }

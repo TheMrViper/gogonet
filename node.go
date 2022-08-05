@@ -1,54 +1,195 @@
 package gogonet
 
 import (
+	"log"
 	"strings"
+	"sync/atomic"
+	"time"
 
-	"github.com/themrviper/gogonet/utils"
+	"./signals"
+	"./utils"
 )
-
-type PathSentCache struct {
-	id              int
-	confirmed_peers map[int]bool
-}
-
-type NodePath string
-
-type NodeInfo struct {
-	path     NodePath
-	instance string
-}
-
-type PathGetCache struct {
-	nodes map[int]NodeInfo
-}
 
 type Node struct {
 	name string
 
-	parent *Node
-	childs []*Node
+	instanceId uint32
 
-	rpc_handlers map[string]IRPC
+	parent INode
+	childs map[uint32]INode
+
+	nativeRpc map[string]INativeMethod
+
+	multiplayerAPI *MultiplayerAPI
 }
 
-var root_node = newNode("root")
-var rpc_dummy_node = newNode("dummy")
+//
+// tree stuff
+//
 
-func GetRootNode() *Node {
-	return root_node
-}
+var tree INode
+var lastInstanceId uint32
 
-func newNode(name string) *Node {
-	return &Node{
-		name: name,
+func init() {
+	tree = NewNode("/root")
 
-		childs: make([]*Node, 0, 0),
+	tree.(*Node).multiplayerAPI = &MultiplayerAPI{
+		signals:        signals.New(),
+		connectedPeers: make(map[uint32]bool),
+		recvPathCache:  make(map[uint32]map[uint32]string),
 
-		rpc_handlers: make(map[string]IRPC),
+		sentPathCache: make(map[string]*SentPathCache),
 	}
 }
 
-func (n *Node) NewNode(path string) (r *Node) {
+type ITree interface {
+	INode
+
+	SetScene(scene INode)
+	SetNetworkPeer(peer INetworkPeer)
+	ListenAndServe()
+}
+
+func GetTree() ITree {
+	return tree.(*Node)
+}
+
+func (t *Node) SetScene(scene INode) {
+	t.childs = make(map[uint32]INode)
+	t.childs[scene.InstanceID()] = scene
+}
+
+func (t *Node) SetNetworkPeer(peer INetworkPeer) {
+	t.multiplayerAPI.SetNetworkPeer(peer)
+}
+
+func (t *Node) ListenAndServe() {
+	go t.multiplayerAPI.ListenAndServe()
+
+	fps := 60
+	prev := time.Now()
+
+	ticker := time.NewTicker(time.Second / time.Duration(fps))
+
+	for now := range ticker.C {
+
+		prev = now
+	}
+}
+
+//
+// scene stuff
+//
+
+var sceneRepo = NewNode("/scene_repo")
+
+type IScene interface {
+	INode
+
+	Instance() INode
+}
+
+func GetScene(name string) IScene {
+	return sceneRepo.GetNode(name).(*Node)
+}
+
+func NewScene(name string) IScene {
+	return sceneRepo.NewNode(name).(*Node)
+}
+
+func GetOrNewScene(name string) IScene {
+	return sceneRepo.GetOrNewNode(name).(*Node)
+}
+
+// Lets think that, /root is scene tree, like in godot, so we can call instance() method
+func (n *Node) Instance() INode {
+	// TODO
+	utils.Log(6, n.parent)
+	utils.IfPanic(n.parent != sceneRepo, "Cannot create instance of this scene, maybe its node?")
+
+	node := n.clone()
+	node.instanceId = nodeGenerateId()
+
+	return node
+}
+
+func (n *Node) clone() *Node {
+	node := NewNode(n.name).node()
+
+	node.nativeRpc = n.nativeRpc
+	for id, child := range n.childs {
+		node.childs[id] = child.node().clone()
+	}
+
+	return node
+}
+
+//
+// node stuff
+//
+
+type INode interface {
+	node() *Node
+	Name() string
+	Path() string
+	InstanceID() uint32
+
+	NewNode(path string) INode
+	GetNode(path string) INode
+	GetOrNewNode(path string) INode
+
+	AppendChild(node INode)
+	AddNativeRPCMethod(method INativeMethod)
+
+	Rpc(procedureName string, params ...interface{})
+	RpcId(id int32, procedureName string, params ...interface{})
+
+	RpcUnreliable(procedureName string, params ...interface{})
+	RpcUnreliableId(id int32, procedureName string, params ...interface{})
+}
+
+func NewNode(name string) INode {
+	return &Node{
+		name: name,
+
+		instanceId: nodeGenerateId(),
+
+		childs: make(map[uint32]INode),
+
+		nativeRpc: make(map[string]INativeMethod),
+	}
+}
+
+func nodeGenerateId() uint32 {
+	atomic.AddUint32(&lastInstanceId, 1)
+	return lastInstanceId
+}
+
+func (n *Node) node() *Node {
+	return n
+}
+
+func (n *Node) Name() string {
+	return n.node().name
+}
+
+func (n *Node) Path() (result string) {
+
+	log.Println(n.parent)
+	for n.parent != nil {
+		result = "/" + n.name + result
+		n = n.parent.node()
+	}
+
+	return
+}
+
+func (n *Node) InstanceID() uint32 {
+	return n.instanceId
+}
+
+// Create child node, or if path is absolute, create node for this path
+func (n *Node) NewNode(path string) (r INode) {
 
 	paths := strings.Split(path, "/")
 	utils.IfPanic(len(paths) < 1, "Cannot create new node, invalid path")
@@ -57,46 +198,27 @@ func (n *Node) NewNode(path string) (r *Node) {
 		// absolute node, go to root and make path relative
 		utils.IfPanic(len(paths) < 2, "Cannot create new node, invalid path")
 
-		return n.GetRootNode().NewNode(strings.Join(paths[1:], "/"))
+		if len(paths[1:]) > 1 && GetTree().Name() == paths[1] {
+			paths = paths[1:]
+		}
+		return GetTree().NewNode(strings.Join(paths[1:], "/"))
 	}
 
 	for len(paths) > 0 {
 
 		utils.IfPanic(len(paths[0]) < 1, "Cannot create new node, invalid path")
 
-		r = newNode(paths[0])
-		r.parent = n
+		r = NewNode(paths[0])
+		r.node().parent = n
 		n.AppendChild(r)
 
-		n = r
+		n = r.node()
 		paths = paths[1:]
 	}
 	return
 }
 
-func (n *Node) GetOrNewNode(path string) *Node {
-	if node := n.GetNode(path); node != nil {
-		return node
-	}
-
-	return n.NewNode(path)
-}
-
-func (n *Node) Name() string {
-	return n.name
-}
-
-func (n *Node) Path() (result string) {
-	for n.parent != nil {
-		result = "/" + n.name + result
-		n = n.parent
-	}
-
-	result = "/" + n.name + result
-	return
-}
-
-func (n *Node) GetNode(path string) *Node {
+func (n *Node) GetNode(path string) INode {
 	paths := strings.Split(path, "/")
 
 	if len(paths) <= 0 {
@@ -110,10 +232,10 @@ func (n *Node) GetNode(path string) *Node {
 		// so this paths will be the same
 		// /root/Button
 		// /Button
-		if len(paths[1:]) > 1 && n.GetRootNode().Name() == paths[1] {
+		if len(paths[1:]) > 1 && GetTree().Name() == paths[1] {
 			paths = paths[1:]
 		}
-		return n.GetRootNode().GetNode(strings.Join(paths[1:], "/"))
+		return GetTree().GetNode(strings.Join(paths[1:], "/"))
 	}
 
 	// If path is relative, search right here
@@ -131,38 +253,38 @@ func (n *Node) GetNode(path string) *Node {
 	return nil
 }
 
-func (n *Node) GetRootNode() *Node {
-	if n.parent == nil {
-		return n
+func (n *Node) GetOrNewNode(path string) INode {
+	if node := n.GetNode(path); node != nil {
+		return node
 	}
 
-	return n.parent
+	return n.NewNode(path)
 }
 
-func (n *Node) AppendChild(node *Node) {
+func (n *Node) AppendChild(node INode) {
 	if node == nil {
 		panic("Node cant be nil")
 	}
 
-	if n.GetNode(node.name) != nil {
-		panic("Node already added, cant duplicate node")
+	if _, ok := n.childs[node.InstanceID()]; ok {
+		return
 	}
 
-	n.childs = append(n.childs, node)
+	node.node().parent = n
+	node.node().multiplayerAPI = n.multiplayerAPI
+	n.childs[node.InstanceID()] = node
 }
 
-func (n *Node) RPCHandler(name string, handler IRPC) {
-	if _, ok := n.rpc_handlers[name]; ok {
-		panic("[node] Handler " + name + " already registered, cant register it twice")
-	}
+//
+// rpc stuff
+//
 
-	n.rpc_handlers[name] = handler
+func (n *Node) AddNativeRPCMethod(method INativeMethod) {
+	n.nativeRpc[method.Name()] = method
 }
 
-func (n *Node) GetRPCHandler(name string) (IRPC, bool) {
-	if handler, ok := n.rpc_handlers[name]; ok {
-		return handler.New(), true
-	}
+func (n *Node) Rpc(procedureName string, params ...interface{})             {}
+func (n *Node) RpcId(id int32, procedureName string, params ...interface{}) {}
 
-	return nil, false
-}
+func (n *Node) RpcUnreliable(procedureName string, params ...interface{})             {}
+func (n *Node) RpcUnreliableId(id int32, procedureName string, params ...interface{}) {}
